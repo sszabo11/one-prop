@@ -15,8 +15,8 @@ pub enum PayloadData {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TelemetryPacket {
-    pub altitude: f32,
-    pub speed: f32,
+    pub roll: f32,
+    pub pitch: f32,
     pub seq: u8,
 }
 
@@ -47,10 +47,13 @@ pub fn encode_packet(p: PayloadData) -> [u8; 8] {
             let yaw = p[7..8].copy_from_slice(&((data.yaw) as u8).to_le_bytes());
             p
         }
-        PayloadData::Telemetry(_) => {
+        PayloadData::Telemetry(data) => {
             // Telemetry packet
             let mut p = [0u8; 8];
             p[0] = 0xC2;
+            p[1] = data.seq;
+            let roll = p[2..4].copy_from_slice(&((data.roll * 1000.) as i16).to_le_bytes());
+            let pitch = p[4..6].copy_from_slice(&((data.pitch * 1000.) as i16).to_le_bytes());
             p
         }
         PayloadData::PidConfig(data) => {
@@ -97,8 +100,15 @@ pub fn decode_packet(p: &[u8]) -> Result<PayloadData, PayloadData> {
         }
         0xC2 => {
             // Telemetry packet
+            let seq = p[1];
+            let roll = i16::from_le_bytes([p[2], p[3]]);
+            let pitch = i16::from_le_bytes([p[4], p[5]]);
 
-            Ok(PayloadData::Invalid)
+            Ok(PayloadData::Telemetry(TelemetryPacket {
+                roll: roll as f32 / 1000.,
+                pitch: pitch as f32 / 1000.,
+                seq,
+            }))
         }
         0xC3 => {
             // Pid packet

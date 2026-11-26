@@ -44,13 +44,22 @@ pub fn decode_command(raw: &[u8]) -> Option<ControlCommand> {
             let mut parts = s.split_whitespace();
             let _key = parts.next()?;
             let kp_str = parts.next()?;
-            let kp: f32 = val_str.parse().ok()?;
+            let kp: f32 = kp_str.parse().ok()?;
 
             let ki_str = parts.next()?;
-            let ki: f32 = val_str.parse().ok()?;
+            let ki: f32 = ki_str.parse().ok()?;
 
             let kd_str = parts.next()?;
-            let kd: f32 = val_str.parse().ok()?;
+            let kd: f32 = kd_str.parse().ok()?;
+            //log::info!("raw: {}", s);
+            //log::info!("parts: {:?}, kp: {}, ki: {}, kd: {}", parts, kp, ki, kd);
+            //log::info!(
+            //    "parts str: {:?}, kp: {}, ki: {}, kd: {}",
+            //    parts,
+            //    kp_str,
+            //    ki_str,
+            //    kd_str
+            //);
 
             ControlCommand::Pid(kp, ki, kd)
         }

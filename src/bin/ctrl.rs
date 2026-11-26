@@ -8,6 +8,7 @@
 #![deny(clippy::large_stack_frames)]
 
 use alloc::format;
+use defmt::println;
 use embassy_executor::Spawner;
 use embassy_net::dns::DnsSocket;
 use embassy_net::tcp::client::TcpClient;
@@ -23,7 +24,7 @@ use esp_hal::uart::Uart;
 use esp_hal::{Async, Blocking};
 use esp_hal::{clock::CpuClock, rng::Rng};
 use esp_println::print;
-use esp_radio::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
+use esp_radio::esp_now::{EspNow, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo};
 use esp_radio::wifi::scan::ScanConfig;
 use esp_radio::wifi::{
     AuthenticationMethodConfig, Config, ControllerConfig, Password, WifiController,
@@ -134,9 +135,11 @@ async fn main(spawner: Spawner) -> ! {
 
     let duration = Duration::from_secs(1);
 
+    let (manager, sender, receiver) = esp_now.split();
+
     spawner.spawn(read_uart(uart).unwrap());
-    spawner.spawn(send_pid_config().unwrap());
-    spawner.spawn(send_controls(esp_now).unwrap());
+    spawner.spawn(rec_telemetery(receiver).unwrap());
+    spawner.spawn(send_controls(sender).unwrap());
 
     //let mut seq: u8 = 0;
     //let mut ticker = Ticker::every(Duration::from_millis(50)); // 20 Hz
@@ -197,7 +200,28 @@ async fn main(spawner: Spawner) -> ! {
 pub async fn send_pid_config() {}
 
 #[embassy_executor::task]
-pub async fn send_controls(mut esp_now: EspNow) {
+pub async fn rec_telemetery(mut esp_now: EspNowReceiver) {
+    let duration = Duration::from_millis(1000);
+    let mut ticker = Ticker::every(Duration::from_hz(20));
+
+    loop {
+        // TELEMENTARY
+        match with_timeout(duration, esp_now.receive_async()).await {
+            Ok(res) => {
+                let data = res.data();
+                let p = decode_packet(data).unwrap();
+                log::info!("rec: {:?}", p);
+            }
+            Err(err) => {
+                log::warn!("Receive timeout: {:?}", err);
+            }
+        }
+        ticker.next().await;
+    }
+}
+
+#[embassy_executor::task]
+pub async fn send_controls(mut esp_now: EspNowSender) {
     let peer_mac = [0x68, 0xfe, 0x71, 0x12, 0x65, 0x3c];
     //let peer_mac = [0x1c, 0x8f, 0x57, 0x2f, 0xcd, 0x10];
     //let peer_mac = [0x20, 0x50, 0x0d, 0x4d, 0x3b, 0x10];
@@ -237,28 +261,16 @@ pub async fn send_controls(mut esp_now: EspNow) {
         };
 
         if let Some(config) = PID_CONFIG.try_take() {
-            log::info!("sending pid esp nbow");
             match esp_now
                 .send_async(&peer_mac, &encode_packet(PayloadData::PidConfig(config)))
                 .await
             {
                 Ok(_) => {
-                    log::info!("Sent pid!")
+                    //log::info!("Sent pid!")
                 }
                 Err(err) => log::warn!("Send err: {:?}", err),
             };
         };
-
-        // TELEMENTARY
-        //match with_timeout(duration, esp_now.receive_async()).await {
-        //    Ok(res) => {
-        //        let data = res.data();
-        //        let p = decode_packet(data).unwrap();
-        //    }
-        //    Err(err) => {
-        //        log::warn!("Receive timeout: {:?}", err);
-        //    }
-        //}
 
         seq = seq.wrapping_add(1);
         ticker.next().await;

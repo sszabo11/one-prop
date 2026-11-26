@@ -19,7 +19,7 @@ pub struct Pid {
     primed: bool,
 }
 
-const DT: f32 = 1.0 / 500.0;
+const DT: f32 = 1.0 / 50.0;
 
 impl Default for PidConfig {
     fn default() -> Self {
@@ -57,9 +57,9 @@ impl Pid {
 
     pub fn integral(&mut self, error: f32) -> f32 {
         self.integral += error * DT;
-        //self.integral = self
-        //    .integral
-        //    .clamp(-self.config.integral_limit, self.config.integral_limit);
+        self.integral = self
+            .integral
+            .clamp(-self.config.integral_limit, self.config.integral_limit);
         self.config.ki * self.integral
     }
 
@@ -68,7 +68,7 @@ impl Pid {
             return 0.0;
         }
         let raw = -(meas - self.last_meas) / DT;
-        //self.d_filt += self.config.d_alpha * (raw - self.d_filt);
+        self.d_filt += self.config.d_alpha * (raw - self.d_filt);
 
         self.config.kd * raw
     }
@@ -81,9 +81,9 @@ impl Pid {
         let d = self.derivitive(meas);
 
         self.last_meas = meas;
-        //self.primed = true;
+        self.primed = true;
 
-        //let output = (p + i + d).clamp(-self.config.output_limit, self.config.output_limit);
+        let output = (p + i + d).clamp(-self.config.output_limit, self.config.output_limit);
 
         let output = p + i + d;
         output

@@ -40,7 +40,7 @@ use esp_hal::uart::Uart;
 use esp_hal::{Async, Blocking, DriverMode, i2c};
 use esp_hal::{clock::CpuClock, rng::Rng};
 use esp_println::print;
-use esp_radio::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
+use esp_radio::esp_now::{EspNow, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo};
 use esp_radio::wifi::scan::ScanConfig;
 use esp_radio::wifi::{
     AuthenticationMethodConfig, Config, ControllerConfig, Password, WifiController,
@@ -223,7 +223,35 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98768);
     esp_alloc::heap_allocator!(size: 32 * 1024);
 
-    spawner.spawn(receive_cmds(peripherals.WIFI).unwrap());
+    let controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
+        .expect("Failed to create wifi controller");
+    let mut esp_now = controller.esp_now();
+    esp_now
+        .set_channel(1)
+        .expect("Failed to set esp now channel");
+
+    //let peer_mac = [0x68, 0xfe, 0x71, 0x12, 0x65, 0x3c];
+    //let peer_mac = [0x20, 0x50, 0x0d, 0x4d, 0x3b, 0x10];
+    let peer_mac = [0x1c, 0x8f, 0x57, 0x2f, 0xcd, 0x10];
+    // this is 3b 10
+
+    log::info!("sending to : '0x3c");
+
+    esp_now
+        .add_peer(PeerInfo {
+            interface: EspNowWifiInterface::Station,
+            peer_address: peer_mac,
+            lmk: None,
+            channel: Some(1),
+            encrypt: false,
+        })
+        .unwrap();
+
+    let (manager, sender, receiver) = esp_now.split();
+
+    log::info!("ESP-NOW ready, waiting for packets...");
+
+    spawner.spawn(receive_cmds(receiver).unwrap());
 
     let mut pid_config = PidConfig {
         kp: 0.2,
@@ -253,6 +281,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     spawner.spawn(control_task(actuators, pid_config).unwrap());
+    spawner.spawn(transmit_tlm(sender).unwrap());
     spawner.spawn(read_imu(mpu).unwrap());
 
     loop {
@@ -261,34 +290,8 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn receive_cmds(mut wifi_peri: WIFI<'static>) {
-    let controller = esp_radio::wifi::WifiController::new(wifi_peri, Default::default())
-        .expect("Failed to create wifi controller");
-    let mut esp_now = controller.esp_now();
-    esp_now
-        .set_channel(1)
-        .expect("Failed to set esp now channel");
-
-    //let peer_mac = [0x68, 0xfe, 0x71, 0x12, 0x65, 0x3c];
-    //let peer_mac = [0x20, 0x50, 0x0d, 0x4d, 0x3b, 0x10];
-    let peer_mac = [0x1c, 0x8f, 0x57, 0x2f, 0xcd, 0x10];
-    // this is 3b 10
-
-    log::info!("sending to : '0x3c");
-
-    esp_now
-        .add_peer(PeerInfo {
-            interface: EspNowWifiInterface::Station,
-            peer_address: peer_mac,
-            lmk: None,
-            channel: Some(1),
-            encrypt: false,
-        })
-        .unwrap();
-
+async fn receive_cmds(mut esp_now: EspNowReceiver) {
     let mut seq: u8 = 0;
-
-    log::info!("ESP-NOW ready, waiting for packets...");
     let mut ticker = Ticker::every(Duration::from_millis(50));
 
     loop {
@@ -297,7 +300,7 @@ async fn receive_cmds(mut wifi_peri: WIFI<'static>) {
                 let data = res.data();
                 let p = decode_packet(data).unwrap();
 
-                log::info!("Received to PEER {:?}: {:?}", peer_mac, p);
+                log::info!("Received to PEER: {:?}", p);
 
                 match p {
                     PayloadData::Control(c) => {
@@ -309,7 +312,6 @@ async fn receive_cmds(mut wifi_peri: WIFI<'static>) {
                         });
                     }
                     PayloadData::PidConfig(config) => {
-                        log::info!("got pid packet");
                         PID_CONFIG.signal(config);
                     }
                     _ => {}
@@ -356,12 +358,13 @@ async fn read_imu(mut mpu: Mpu6050<I2c<'static, Async>>) {
 }
 
 #[embassy_executor::task]
-async fn transmit_tlm(mut esp_now: EspNow) {
+async fn transmit_tlm(mut esp_now: EspNowSender) {
     let mut seq: u8 = 0;
 
-    let peer_mac = [0x68, 0xfe, 0x71, 0x12, 0x65, 0x3c];
-
-    log::info!("ESP-NOW ready, sending...");
+    //let peer_mac = [0x68, 0xfe, 0x71, 0x12, 0x65, 0x3c];
+    //let peer_mac = [0x20, 0x50, 0x0d, 0x4d, 0x3b, 0x10];
+    let peer_mac = [0x1c, 0x8f, 0x57, 0x2f, 0xcd, 0x10];
+    // this is 65 3c
     let mut ticker = Ticker::every(Duration::from_millis(50));
 
     let mut telemetry = Telemetery::default();
@@ -379,8 +382,8 @@ async fn transmit_tlm(mut esp_now: EspNow) {
                 &peer_mac,
                 &encode_packet(PayloadData::Telemetry(TelemetryPacket {
                     seq,
-                    altitude: 0.,
-                    speed: 0.,
+                    roll: telemetry.roll,
+                    pitch: telemetry.pitch,
                 })),
             )
             .await
@@ -399,7 +402,7 @@ async fn transmit_tlm(mut esp_now: EspNow) {
 #[embassy_executor::task]
 async fn control_task(mut actuators: Actuators, pid_config: PidConfig) {
     let mut latest = Controls::default();
-    let mut ticker = Ticker::every(Duration::from_hz(500));
+    let mut ticker = Ticker::every(Duration::from_hz(50));
     let max_duty_cycle = actuators.x.max_duty_cycle() as u32;
 
     let min_duty = (25 * max_duty_cycle) / 1000;
@@ -445,9 +448,10 @@ async fn control_task(mut actuators: Actuators, pid_config: PidConfig) {
 
         let pred_x = pid_x.predict(latest.x / 10., imu.roll);
         let pred_y = pid_y.predict(latest.y / 10., imu.pitch);
+        log::info!("roll: {} | pitch: {}", imu.roll, imu.pitch);
 
-        let angle_x = 50. * pred_x;
-        let angle_y = 50. * pred_y;
+        let angle_x = 30. * pred_x;
+        let angle_y = 30. * pred_y;
 
         let duty_x = duty_from_bank_angle(angle_x, min_duty, duty_gap);
         let _ = actuators.x.set_duty_cycle(duty_x);
