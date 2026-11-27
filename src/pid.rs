@@ -24,12 +24,12 @@ const DT: f32 = 1.0 / 50.0;
 impl Default for PidConfig {
     fn default() -> Self {
         Self {
-            kp: 0.2,
+            kp: 0.05,
             ki: 0.0,
             kd: 0.0,
             integral_limit: 0.2,
             output_limit: 1.,
-            d_alpha: 0.2,
+            d_alpha: 0.3,
         }
     }
 }
@@ -70,10 +70,10 @@ impl Pid {
         let raw = -(meas - self.last_meas) / DT;
         self.d_filt += self.config.d_alpha * (raw - self.d_filt);
 
-        self.config.kd * raw
+        self.config.kd * self.d_filt
     }
 
-    pub fn predict(&mut self, setpoint: f32, meas: f32) -> f32 {
+    pub fn update(&mut self, setpoint: f32, meas: f32) -> f32 {
         let error = setpoint - meas;
 
         let p = self.proportional(error);
@@ -85,7 +85,6 @@ impl Pid {
 
         let output = (p + i + d).clamp(-self.config.output_limit, self.config.output_limit);
 
-        let output = p + i + d;
         output
     }
 }

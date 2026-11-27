@@ -254,12 +254,12 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(receive_cmds(receiver).unwrap());
 
     let mut pid_config = PidConfig {
-        kp: 0.2,
+        kp: 0.05,
         ki: 0.0,
         kd: 0.0,
         integral_limit: 0.2,
         output_limit: 1.,
-        d_alpha: 0.2,
+        d_alpha: 0.3,
     };
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -329,28 +329,30 @@ async fn receive_cmds(mut esp_now: EspNowReceiver) {
 
 #[embassy_executor::task]
 async fn read_imu(mut mpu: Mpu6050<I2c<'static, Async>>) {
+    let sender = TELEMETERY.sender();
     log::info!("MPU6050 reading...");
-    let mut ticker = Ticker::every(Duration::from_hz(200));
+
+    let mut buf = [0u8; 28];
+    let mut ticker = Ticker::every(Duration::from_hz(50));
     loop {
-        let len = mpu.get_fifo_count().unwrap();
-        let mut buf = [0u8; 28];
-        if len >= 28 {
-            let buf = mpu.read_fifo(&mut buf).unwrap();
-            let q = Quaternion::from_bytes(&buf[..16]).unwrap().normalize();
-            let ypr = YawPitchRoll::from(q);
-            //log::info!("{:?}", ypr);
-            //let accel = mpu.accel().expect("Failed to read accel");
-
-            //log::info!("x: {} | y: {} | z: {}", accel.x(), accel.y(), accel.z());
-            let sender = TELEMETERY.sender();
-
-            let p = Telemetery {
-                pitch: ypr.pitch,
-                roll: ypr.roll,
-            };
-
-            //log::info!("{},{}", p.roll, p.pitch);
-            sender.send(p);
+        let mut len = mpu.get_fifo_count().unwrap();
+        if len >= 1000 {
+            let _ = mpu.reset_fifo(); // overflow: discard everything and resync
+        } else {
+            let mut latest = None;
+            while len >= 28 {
+                if let Ok(b) = mpu.read_fifo(&mut buf) {
+                    latest = Quaternion::from_bytes(&b[..16]);
+                }
+                len -= 28;
+            }
+            if let Some(q) = latest {
+                let ypr = YawPitchRoll::from(q.normalize());
+                sender.send(Telemetery {
+                    pitch: ypr.pitch,
+                    roll: ypr.roll,
+                });
+            }
         }
 
         ticker.next().await
@@ -420,35 +422,26 @@ async fn control_task(mut actuators: Actuators, pid_config: PidConfig) {
 
     let mut pid_x = Pid::new(pid_config);
     let mut pid_y = Pid::new(pid_config);
-    //let mut pid_x = Pid::new(PidConfig {
-    //    kp: 0.2,
-    //    ki: 0.0,
-    //    kd: 0.0,
-    //    integral_limit: 0.2,
-    //    output_limit: 1.,
-    //    d_alpha: 0.2,
-    //});
-    //let mut pid_y = Pid::new(PidConfig {
-    //    kp: 0.2,
-    //    ki: 0.0,
-    //    kd: 0.0,
-    //    integral_limit: 0.2,
-    //    output_limit: 1.,
-    //    d_alpha: 0.2,
-    //});
 
     let mut imu = Telemetery::default();
+    let last_ctrl = Instant::now();
+
     loop {
         if let Some(c) = CONTROLS.try_take() {
             latest = c;
+        }
+        if last_ctrl.elapsed() > Duration::from_millis(250) {
+            latest.throttle = 0.;
         }
         if let Some(t) = rec.try_get() {
             imu = t
         }
 
-        let pred_x = pid_x.predict(latest.x / 10., imu.roll);
-        let pred_y = pid_y.predict(latest.y / 10., imu.pitch);
-        log::info!("roll: {} | pitch: {}", imu.roll, imu.pitch);
+        let roll = -imu.roll * 57.2958;
+        let pitch = -imu.pitch * 57.2958;
+        let pred_x = pid_x.update(latest.x / 10., roll);
+        let pred_y = pid_y.update(latest.y / 10., pitch);
+        log::info!("roll: {} | pitch: {}", roll, pitch);
 
         let angle_x = 30. * pred_x;
         let angle_y = 30. * pred_y;
@@ -459,16 +452,16 @@ async fn control_task(mut actuators: Actuators, pid_config: PidConfig) {
         let duty_y = duty_from_bank_angle(angle_y, min_duty, duty_gap);
         let _ = actuators.y.set_duty_cycle(duty_y);
 
-        if latest.throttle < 4. {
-            latest.throttle = 0.;
-            pid_x.reset();
-            pid_y.reset();
-        }
-        let raw = (latest.throttle / 100.) * 4095.;
-        let pulse_us: u32 = 1000 + (raw as u32 * 1000) / 4095;
-        let pulse_us: u32 = pulse_us.clamp(1000, 2000);
+        //if latest.throttle < 4. {
+        //    latest.throttle = 0.;
+        //    pid_x.reset();
+        //    pid_y.reset();
+        //}
+        //let raw = (latest.throttle / 100.) * 4095.;
+        //let pulse_us: u32 = 1000 + (raw as u32 * 1000) / 4095;
+        //let pulse_us: u32 = pulse_us.clamp(1000, 2000);
 
-        actuators.throttle.set_duty_hw(us_to_duty(pulse_us));
+        //actuators.throttle.set_duty_hw(us_to_duty(pulse_us));
 
         ticker.next().await;
     }
@@ -519,24 +512,6 @@ pub fn duty_from_bank_angle(deg: f32, min_duty: u32, duty_gap: u32) -> u16 {
     duty.round() as u16
 }
 
-fn arm_motor2(motor: &mut Channel<'static, LowSpeed>) {
-    let max_duty = 16383u32;
-    let period_us = 20_000u32;
-    let us_to_duty = |us: u32| -> u32 {
-        // duty = us / period * max_duty
-        (us * max_duty) / period_us
-    };
-    let delay = Delay::new();
-    set_esc_throttle(motor, 1000); // 1000 µs = stop
-    delay.delay_millis(3000);
-    motor.set_duty_hw(us_to_duty(1000));
-    delay.delay_millis(4000); // wait for arm
-
-    for _ in 0..150 {
-        set_esc_throttle2(motor, 0);
-        delay.delay_millis(20);
-    }
-}
 fn arm_motor(motor: &mut Channel<'static, LowSpeed>) {
     let max_duty = 16383u32;
     let period_us = 20_000u32;
