@@ -8,7 +8,7 @@ runner = "espflash flash --monitor --chip esp32 --monitor-baud 921600"
 rustflags = [
   "-C", "link-arg=-nostartfiles",
   "-C", "link-arg=-Tdefmt.x",     
-
+  "-C", "force-frame-pointers",
 ]
 
 target = "xtensa-esp32-none-elf"

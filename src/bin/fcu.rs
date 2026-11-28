@@ -127,8 +127,8 @@ async fn main(spawner: Spawner) -> ! {
         ledc,
         peripherals.GPIO13, // x
         peripherals.GPIO14, // y
-        peripherals.GPIO15, // Elevator
-        peripherals.GPIO32, // Throttle
+        peripherals.GPIO32, // Elevator
+        peripherals.GPIO15, // Throttle
     );
     log::info!("Actuaters Set!");
 
@@ -202,13 +202,13 @@ async fn main(spawner: Spawner) -> ! {
     //    .unwrap();
 
     // ESC
-    //arm_motor(&mut actuators.throttle);
+    arm_motor(&mut actuators.throttle);
     log::info!("Motor armed!");
 
     let i2c = I2c::new(peripherals.I2C0, i2c::master::Config::default())
         .unwrap()
-        .with_sda(peripherals.GPIO21)
-        .with_scl(peripherals.GPIO22)
+        .with_sda(peripherals.GPIO22)
+        .with_scl(peripherals.GPIO21)
         .into_async();
 
     let mut delay = Delay::new();
@@ -292,13 +292,13 @@ async fn main(spawner: Spawner) -> ! {
 #[embassy_executor::task]
 async fn receive_cmds(mut esp_now: EspNowReceiver) {
     let mut seq: u8 = 0;
-    let mut ticker = Ticker::every(Duration::from_millis(50));
+    let mut ticker = Ticker::every(Duration::from_hz(50));
 
     loop {
         match with_timeout(Duration::from_secs(1), esp_now.receive_async()).await {
             Ok(res) => {
                 let data = res.data();
-                let p = decode_packet(data).unwrap();
+                let p = decode_packet(data).expect("failed to decode packet");
 
                 log::info!("Received to PEER: {:?}", p);
 
@@ -335,7 +335,7 @@ async fn read_imu(mut mpu: Mpu6050<I2c<'static, Async>>) {
     let mut buf = [0u8; 28];
     let mut ticker = Ticker::every(Duration::from_hz(50));
     loop {
-        let mut len = mpu.get_fifo_count().unwrap();
+        let mut len = mpu.get_fifo_count().expect("failed to get fifo count");
         if len >= 1000 {
             let _ = mpu.reset_fifo(); // overflow: discard everything and resync
         } else {
@@ -367,7 +367,7 @@ async fn transmit_tlm(mut esp_now: EspNowSender) {
     //let peer_mac = [0x20, 0x50, 0x0d, 0x4d, 0x3b, 0x10];
     let peer_mac = [0x1c, 0x8f, 0x57, 0x2f, 0xcd, 0x10];
     // this is 65 3c
-    let mut ticker = Ticker::every(Duration::from_millis(50));
+    let mut ticker = Ticker::every(Duration::from_hz(20));
 
     let mut telemetry = Telemetery::default();
 
@@ -391,7 +391,7 @@ async fn transmit_tlm(mut esp_now: EspNowSender) {
             .await
         {
             Ok(_) => {
-                log::info!("Sent!")
+                //log::info!("Sent!")
             }
             Err(err) => log::warn!("Send err: {:?}", err),
         };
@@ -424,11 +424,12 @@ async fn control_task(mut actuators: Actuators, pid_config: PidConfig) {
     let mut pid_y = Pid::new(pid_config);
 
     let mut imu = Telemetery::default();
-    let last_ctrl = Instant::now();
+    let mut last_ctrl = Instant::now();
 
     loop {
         if let Some(c) = CONTROLS.try_take() {
             latest = c;
+            last_ctrl = Instant::now();
         }
         if last_ctrl.elapsed() > Duration::from_millis(250) {
             latest.throttle = 0.;
@@ -438,9 +439,9 @@ async fn control_task(mut actuators: Actuators, pid_config: PidConfig) {
         }
 
         let roll = -imu.roll * 57.2958;
-        let pitch = -imu.pitch * 57.2958;
-        let pred_x = pid_x.update(latest.x / 10., roll);
-        let pred_y = pid_y.update(latest.y / 10., pitch);
+        let pitch = imu.pitch * 57.2958;
+        let pred_x = pid_x.update(latest.x / 5., roll);
+        let pred_y = pid_y.update(latest.y / 5., pitch);
         log::info!("roll: {} | pitch: {}", roll, pitch);
 
         let angle_x = 30. * pred_x;
@@ -452,16 +453,16 @@ async fn control_task(mut actuators: Actuators, pid_config: PidConfig) {
         let duty_y = duty_from_bank_angle(angle_y, min_duty, duty_gap);
         let _ = actuators.y.set_duty_cycle(duty_y);
 
-        //if latest.throttle < 4. {
-        //    latest.throttle = 0.;
-        //    pid_x.reset();
-        //    pid_y.reset();
-        //}
-        //let raw = (latest.throttle / 100.) * 4095.;
-        //let pulse_us: u32 = 1000 + (raw as u32 * 1000) / 4095;
-        //let pulse_us: u32 = pulse_us.clamp(1000, 2000);
+        if latest.throttle < 4. {
+            latest.throttle = 0.;
+            //pid_x.reset();
+            //pid_y.reset();
+        }
+        let raw = (latest.throttle / 100.) * 4095.;
+        let pulse_us: u32 = 1000 + (raw as u32 * 1000) / 4095;
+        let pulse_us: u32 = pulse_us.clamp(1000, 2000);
 
-        //actuators.throttle.set_duty_hw(us_to_duty(pulse_us));
+        actuators.throttle.set_duty_hw(us_to_duty(pulse_us));
 
         ticker.next().await;
     }

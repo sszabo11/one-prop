@@ -226,7 +226,7 @@ pub async fn send_controls(mut esp_now: EspNowSender) {
     //let peer_mac = [0x1c, 0x8f, 0x57, 0x2f, 0xcd, 0x10];
     //let peer_mac = [0x20, 0x50, 0x0d, 0x4d, 0x3b, 0x10];
 
-    let mut ticker = Ticker::every(Duration::from_hz(20));
+    let mut ticker = Ticker::every(Duration::from_hz(50));
     let mut seq = 0;
 
     let mut controls = Controls {
